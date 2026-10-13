@@ -1,55 +1,56 @@
-# Clef-Flash GGUF Decision API
+# Clef-Flash Decision API
 
-This repository contains the API service running at https://clef.aiurl.tw.
-It is the secondary CPU-backed service; the primary GPU service runs at
-https://clef.create360.ai.
+This repository documents the primary production Decision API. The public API
+is exposed through the external hostname `https://clef.create360.ai`.
 
-## API
+`10.9.0.32` is the private internal host that runs the production containers.
+It is not the public API address.
 
-- Swagger: https://clef.aiurl.tw/docs
-- ReDoc: https://clef.aiurl.tw/redoc
-- OpenAPI: https://clef.aiurl.tw/openapi.json
-- Health: https://clef.aiurl.tw/health
-- Inference: POST https://clef.aiurl.tw/v1/systemone
+## Public API
 
-The FastAPI facade forwards typed System One requests to the local llama.cpp
-server at 127.0.0.1:18080. It supports the choice, noul, and score question
-types. Instructions and criteria accept strings, objects, and arrays; Choice
-descriptions also accept null. Score response legends preserve the submitted
-level descriptions.
+- Swagger: https://clef.create360.ai/docs
+- ReDoc: https://clef.create360.ai/redoc
+- OpenAPI: https://clef.create360.ai/openapi.json
+- Health: https://clef.create360.ai/health
+- Inference: POST https://clef.create360.ai/v1/systemone
 
-The model server has 16,384 tokens of total context across two parallel slots.
-Its physical batch and ubatch are 4,096 tokens. Each complete rendered prompt
-must fit within one 4,096-token batch. The API does not split requests.
+The public hostname routes to the API facade. Clients should use the public
+hostname and should not depend on the private host address or loopback ports.
 
-## Install and run
+## Internal production deployment
 
-Python 3.12 and the existing llama.cpp model server are required. The installer
-downloads the GGUF files into models/; model files and .venv are excluded from
-Git. For a new host:
+The current production path on the private host is:
 
-    ./install.sh
+```text
+External client
+    |
+    v
+https://clef.create360.ai
+    |
+    v
+clef-flash-api facade       127.0.0.1:18100 -> container:8000
+    |
+    v
+clef-flash-service llama.cpp 127.0.0.1:18080 -> container:8080
+```
 
-The API runs under systemd as clef-flash.service on port 8099. It sends
-inference telemetry to InfluxDB. Configure the token outside the repository:
+Current runtime facts:
 
-    sudo install -m 600 -o root -g root /dev/null /etc/clef-flash.env
-    sudoedit /etc/clef-flash.env
-    sudo install -d -m 755 /etc/systemd/system/clef-flash.service.d
-    sudo install -m 644 deploy/systemd/clef-flash.service.d/10-env.conf /etc/systemd/system/clef-flash.service.d/10-env.conf
-    sudo systemctl daemon-reload
-    sudo systemctl restart clef-flash.service
+- Private host: `10.9.0.32`
+- API facade container: `clef-flash-api`
+- Model backend container: `clef-flash-service`
+- API facade loopback port: `18100`
+- Model backend loopback port: `18080`
+- Current model: D3 `vllm-d3-flash-Q4_K_M.gguf`
+- Current projector: `mmproj-vllm-d3-flash-Q8_0.gguf`
+- GPU: NVIDIA RTX A4000
 
-Set INFLUX_TOKEN, INFLUX_URL, and HOST_NAME in /etc/clef-flash.env. The .env.example file is a placeholder
-only; never put a live token in Git. Backups, model weights, and the Python
-virtual environment are ignored by .gitignore.
+## Model switching
 
-## Model switching on `10.9.0.32`
-
-The GPU host keeps the public API and backend ports stable while switching the
-decision model. The switch helper validates both health endpoints and sends a
-System One smoke request. A failed startup or smoke check restores the previous
-container automatically.
+The host has a guarded switch helper. It keeps the public hostname and both
+internal ports unchanged, waits for backend and API health, sends a System One
+smoke request, and restores the previous model automatically when validation
+fails.
 
 ```sh
 ssh 10.9.0.32 /home/human/bin/clef-model-switch status
@@ -57,11 +58,62 @@ ssh 10.9.0.32 /home/human/bin/clef-model-switch d3
 ssh 10.9.0.32 /home/human/bin/clef-model-switch clef
 ```
 
-The helper keeps backend port `18080`, facade port `18100`, and the existing
-`clef.create360.ai` routes. The current production model is D3; Clef remains
-available as the rollback model.
+Use `d3` for the current production model and `clef` to switch back to the
+rollback model.
 
-## Development
+## API contract
 
-Install the pinned API dependencies from requirements.txt. Contract checks are
-in test_api_contract.py; the model weights remain external to Git.
+`POST /v1/systemone` accepts a JSON object with `state` and a non-empty
+`questions` map. The question types are `choice`, `noul`, and `score`.
+
+```json
+{
+  "model": "clef-flash",
+  "state": {
+    "invoice": {
+      "vendor": "Acme",
+      "total": 1250,
+      "currency": "USD",
+      "status": "overdue"
+    }
+  },
+  "questions": {
+    "status": {
+      "type": "choice",
+      "instructions": "What is the invoice status?",
+      "criteria": {
+        "paid": "Invoice is paid.",
+        "overdue": "Invoice is past due.",
+        "draft": "Invoice was not sent."
+      }
+    },
+    "urgent": {
+      "type": "noul",
+      "instructions": "Does this require action today?"
+    },
+    "priority": {
+      "type": "score",
+      "instructions": "How urgent is this invoice?",
+      "criteria": ["Routine", "Soon", "Today"]
+    }
+  }
+}
+```
+
+The response contains `model`, `answers`, and `usage`. Choice answers include
+`choice`, `probabilities`, and `confidence`. Noul answers include the
+probability of true. Score answers include a probability-weighted score,
+legend, probabilities, and confidence.
+
+## Runtime limits
+
+The model server uses 16,384 total context tokens across two parallel slots,
+with 4,096-token logical and physical batches. The complete rendered request,
+including state, instructions, criteria, and image tokens, must fit within one
+4,096-token physical batch. The API does not split oversized requests.
+
+## Repository notes
+
+Model weights and virtual environments remain external to Git. Keep runtime
+secrets outside the repository. Validate the public health endpoint and a
+representative `/v1/systemone` request after deployment or model switching.
