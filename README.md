@@ -44,6 +44,23 @@ Set INFLUX_TOKEN, INFLUX_URL, and HOST_NAME in /etc/clef-flash.env. The .env.exa
 only; never put a live token in Git. Backups, model weights, and the Python
 virtual environment are ignored by .gitignore.
 
+## Model switching on `10.9.0.32`
+
+The GPU host keeps the public API and backend ports stable while switching the
+decision model. The switch helper validates both health endpoints and sends a
+System One smoke request. A failed startup or smoke check restores the previous
+container automatically.
+
+```sh
+ssh 10.9.0.32 /home/human/bin/clef-model-switch status
+ssh 10.9.0.32 /home/human/bin/clef-model-switch d3
+ssh 10.9.0.32 /home/human/bin/clef-model-switch clef
+```
+
+The helper keeps backend port `18080`, facade port `18100`, and the existing
+`clef.create360.ai` routes. The current production model is D3; Clef remains
+available as the rollback model.
+
 ## Development
 
 Install the pinned API dependencies from requirements.txt. Contract checks are
